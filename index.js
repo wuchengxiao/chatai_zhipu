@@ -5,6 +5,11 @@ class ChatApp {
         this.currentTheme = this.loadTheme();
         this.isPersonaPickerOpen = false;
         this.models = {
+            'auto': {
+                name: '自动',
+                icon: '🔄',
+                color: '#8b5cf6'
+            },
             'GLM-4.7': {
                 name: 'GLM-4.7-Flash',
                 icon: '⚡',
@@ -16,7 +21,7 @@ class ChatApp {
                 color: '#2563eb'
             }
         };
-        this.currentModel = 'GLM-4.7';
+        this.currentModel = 'auto';
         this.sessions = this.loadSessions();
         this.currentSessionId = null;
         this.isSending = false;
@@ -1012,6 +1017,35 @@ class ChatApp {
         };
     }
 
+    async runRoleAgentResponse(content, session, assistantMessage) {
+        if (!window.getRoleAgentModelConversation) {
+            throw new Error('role-agent 模型请求功能未加载，请刷新页面后重试。');
+        }
+
+        const result = await window.getRoleAgentModelConversation(content, {
+            onUpdate: (text) => {
+                assistantMessage.content = text || '';
+                this.saveSessions();
+                this.updateMessageBubble(assistantMessage.id, assistantMessage.content, '');
+            }
+        });
+
+        const finalText = result && typeof result.text === 'string'
+            ? result.text.trim()
+            : '';
+        if (!finalText) {
+            throw new Error('接口未返回有效内容');
+        }
+
+        assistantMessage.content = finalText;
+        session.updatedAt = new Date().toISOString();
+        this.saveSessions();
+        this.renderSessionList();
+        this.updateMessageBubble(assistantMessage.id, assistantMessage.content, '');
+        this.updateInputPlaceholder();
+        return finalText;
+    }
+
     // Messaging
     // 依赖 request/requestText.js
     async sendMessage(options = {}) {
@@ -1035,6 +1069,7 @@ class ChatApp {
         const activeModelId = session && session.model && this.models[session.model]
             ? session.model
             : this.currentModel;
+        const useAutomaticModel = activeModelId === 'auto';
         const useRoleAgentModel = activeModelId === 'role-agent';
         const selectedRole = this.getSessionRole(session);
         const activeRole = this.getActiveRole(session);
@@ -1081,31 +1116,7 @@ class ChatApp {
                 this.saveSessions();
                 this.renderChat();
 
-                if (!window.getRoleAgentModelConversation) {
-                    throw new Error('role-agent 模型请求功能未加载，请刷新页面后重试。');
-                }
-
-                const result = await window.getRoleAgentModelConversation(content, {
-                    onUpdate: (text) => {
-                        if (!assistantMessage) {
-                            return;
-                        }
-                        assistantMessage.content = text || '';
-                        this.saveSessions();
-                        this.updateMessageBubble(assistantMessage.id, assistantMessage.content, '');
-                    }
-                });
-
-                const finalText = result && typeof result.text === 'string'
-                    ? result.text.trim()
-                    : '';
-
-                assistantMessage.content = finalText || '【请求失败】接口未返回有效内容';
-                session.updatedAt = new Date().toISOString();
-                this.saveSessions();
-                this.renderSessionList();
-                this.updateMessageBubble(assistantMessage.id, assistantMessage.content, '');
-                this.updateInputPlaceholder();
+                await this.runRoleAgentResponse(content, session, assistantMessage);
                 return;
             }
 
@@ -1299,46 +1310,17 @@ class ChatApp {
             this.sessionThinkingMessageIdById[this.currentSessionId] = null;
 
             const errorMessage = this.getRequestErrorText(e, '请求失败');
-            const canFallback = !useRoleAgentModel && !this.baiduAgentTried && window.getBaiduAgentConversation;
-
-            if (canFallback && content) {
-                this.baiduAgentTried = true;
-                this.hideTypingIndicator();
-
+            if (useAutomaticModel && assistantMessage && content) {
                 try {
-                    const result = await window.getBaiduAgentConversation(content, {});
-                    if (result && result.text) {
-                        if (assistantMessage) {
-                            assistantMessage.content = result.text;
-                        } else {
-                            assistantMessage = {
-                                id: 'msg_' + (Date.now() + 2),
-                                role: 'assistant',
-                                content: result.text,
-                                time: new Date().toLocaleTimeString('zh-CN', {
-                                    hour: '2-digit',
-                                    minute: '2-digit'
-                                })
-                            };
-                            session.messages.push(assistantMessage);
-                        }
-                        session.updatedAt = new Date().toISOString();
-                        this.saveSessions();
-                        this.renderSessionList();
-                        if (assistantMessage.id) {
-                            this.updateMessageBubble(assistantMessage.id, assistantMessage.content, '');
-                        } else {
-                            this.renderChat();
-                        }
-                        this.isSending = false;
-                        return;
-                    }
-                } catch (baiduErr) {
-                    console.warn('百度智能体备用调用失败:', baiduErr);
+                    await this.runRoleAgentResponse(content, session, assistantMessage);
+                    this.sessionThinkingById[this.currentSessionId] = '';
+                    this.sessionThinkingMessageIdById[this.currentSessionId] = null;
+                    this.isSending = false;
+                    return;
+                } catch (roleAgentError) {
+                    console.warn('自动模式切换到 role-agent 失败:', roleAgentError);
                 }
             }
-
-            this.baiduAgentTried = false;
 
             if (assistantMessage) {
                 assistantMessage.content = errorMessage;
