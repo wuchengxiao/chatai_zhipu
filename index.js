@@ -30,6 +30,10 @@ class ChatApp {
         this.sessionThinkingMessageIdById = {};
         this.selectedTools = [];
 
+        // role agent 初始化角色
+        this.roleAgentInitializedRole = null;
+        this.roleAgentInitPromise = null;
+
         this.applyTheme(this.currentTheme);
         this.init();
     }
@@ -495,6 +499,11 @@ class ChatApp {
         this.renderChat();
         this.updateInputPlaceholder();
         this.showToast(`已切换对话人物：${roles[roleIndex].name}`);
+
+        this.initializeRoleAgentRole(roles[roleIndex]).catch(error => {
+            console.error('role-agent 角色初始化失败:', error);
+            this.showToast('角色设定发送失败，发送消息时会重试');
+        });
     }
 
     togglePersonaPicker(force) {
@@ -1017,6 +1026,62 @@ class ChatApp {
         };
     }
 
+    buildRoleAgentRolePrompt(role) {
+        const systemPrompt = role && role.systemPrompt && role.systemPrompt.content
+            ? role.systemPrompt.content
+            : '';
+    
+        const guide = Array.isArray(role && role.guide)
+            ? role.guide.filter(item => typeof item === 'string' && item.trim())
+            : [];
+    
+        return [
+            `请从现在开始扮演「${role.name || '助手'}」。`,
+            role.intro ? `角色简介：${role.intro}` : '',
+            guide.length ? `行为指南：\n- ${guide.join('\n- ')}` : '',
+            systemPrompt ? `角色要求：\n${systemPrompt}` : '',
+            '请记住以上角色设定，后续对话都按照该身份、语气和要求回复。'
+        ].filter(Boolean).join('\n\n');
+    }
+
+    async initializeRoleAgentRole(role) {
+        if (!role || !window.getRoleAgentModelConversation) {
+            return;
+        }
+    
+        if (this.roleAgentInitializedRole === role.name) {
+            return;
+        }
+    
+        // 同一角色初始化过程中，避免重复发送设定
+        if (this.roleAgentInitPromise) {
+            await this.roleAgentInitPromise;
+            if (this.roleAgentInitializedRole === role.name) {
+                return;
+            }
+        }
+    
+        this.roleAgentInitPromise = (async () => {
+            // 新角色设定从一个新的 role-agent 对话上下文开始
+            if (window.clearRoleAgentModelSession) {
+                await window.clearRoleAgentModelSession();
+            }
+    
+            // 用普通文本发送角色设定；不传 onUpdate，因此初始化回复不会显示
+            await window.getRoleAgentModelConversation(
+                this.buildRoleAgentRolePrompt(role)
+            );
+    
+            this.roleAgentInitializedRole = role.name;
+        })();
+    
+        try {
+            await this.roleAgentInitPromise;
+        } finally {
+            this.roleAgentInitPromise = null;
+        }
+    }
+    
     async runRoleAgentResponse(content, session, assistantMessage) {
         if (!window.getRoleAgentModelConversation) {
             throw new Error('role-agent 模型请求功能未加载，请刷新页面后重试。');
@@ -1116,6 +1181,7 @@ class ChatApp {
                 this.saveSessions();
                 this.renderChat();
 
+                await this.initializeRoleAgentRole(activeRole);
                 await this.runRoleAgentResponse(content, session, assistantMessage);
                 return;
             }
